@@ -32,7 +32,12 @@ from dify_plugin.interfaces.agent import (
     ToolEntity,
 )
 
-from strategies.self_refine import SelfRefineParams, SelfRefineStrategy
+from strategies.self_refine import (
+    EvaluationResult,
+    ExecutionMetadata,
+    SelfRefineParams,
+    SelfRefineStrategy,
+)
 
 
 def _list_content_message(text: str) -> AssistantPromptMessage:
@@ -190,7 +195,7 @@ class TestSelfRefineListContent(unittest.TestCase):
     def test_invoke_end_to_end_satisfactory_on_first_attempt(self):
         model = AgentModelConfig(provider="google", model="gemini-1.5-pro", mode="chat")
 
-        eval_json = '{"is_satisfactory": true, "issues": "", "score": 10}'
+        eval_json = '{"is_satisfactory": true, "issues": "", "score": 100}'
         responses = [
             LLMResult(
                 model="gemini-1.5-pro",
@@ -360,6 +365,65 @@ class TestSelfRefineTools(unittest.TestCase):
 
         self.assertEqual(self.strategy.session.model.llm.invoke.call_count, 1)
         self.assertEqual(result["output"], "42")
+
+
+class TestSelfRefineQualityContract(unittest.TestCase):
+    def setUp(self):
+        self.strategy = SelfRefineStrategy(runtime=Mock(), session=Mock())
+        self.model = AgentModelConfig(provider="openai", model="gpt-4o", mode="chat")
+
+    def _messages(self, max_refinements: int = 1):
+        return list(self.strategy._invoke({
+            "query": "hello",
+            "instruction": "answer briefly",
+            "model": self.model.model_dump(mode="json"),
+            "max_refinements": max_refinements,
+        }))
+
+    def test_score_threshold_overrides_inconsistent_satisfactory_flag(self):
+        outputs = iter(["first", "second"])
+        evaluations = iter([
+            EvaluationResult(is_satisfactory=True, score=79, issues="improve"),
+            EvaluationResult(is_satisfactory=False, score=80),
+        ])
+        self.strategy._execute_agent = Mock(side_effect=lambda **_: _execution_result(outputs))
+        self.strategy._evaluate_output = Mock(side_effect=lambda **_: next(evaluations))
+
+        messages = self._messages()
+
+        self.assertEqual(self.strategy._execute_agent.call_count, 2)
+        self.assertEqual(self.strategy._evaluate_output.call_count, 2)
+        self.assertEqual(_last_text_message(messages), "second")
+
+    def test_returns_highest_scoring_output_when_budget_is_exhausted(self):
+        outputs = iter(["best", "worse", "worst"])
+        evaluations = iter([
+            EvaluationResult(score=70, issues="first critique"),
+            EvaluationResult(score=60, issues="second critique"),
+            EvaluationResult(score=50, issues="third critique"),
+        ])
+        self.strategy._execute_agent = Mock(side_effect=lambda **_: _execution_result(outputs))
+        self.strategy._evaluate_output = Mock(side_effect=lambda **_: next(evaluations))
+
+        messages = self._messages(max_refinements=2)
+
+        self.assertEqual(self.strategy._evaluate_output.call_count, 3)
+        self.assertEqual(_last_text_message(messages), "best")
+
+
+def _execution_result(outputs):
+    output = next(outputs)
+    if False:
+        yield
+    return {"output": output, "metadata": ExecutionMetadata()}
+
+
+def _last_text_message(messages):
+    return next(
+        message.message.text
+        for message in reversed(messages)
+        if isinstance(message.message, ToolInvokeMessage.TextMessage)
+    )
 
 
 if __name__ == "__main__":

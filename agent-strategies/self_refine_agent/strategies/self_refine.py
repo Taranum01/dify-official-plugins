@@ -87,6 +87,8 @@ class EvaluationResult(BaseModel):
 
 
 class SelfRefineStrategy(AgentStrategy):
+    QUALITY_THRESHOLD = 80
+
     """
     Self-Refine Agent Strategy
 
@@ -114,6 +116,8 @@ class SelfRefineStrategy(AgentStrategy):
         refinement_count = 0
         previous_critique: Optional[str] = None
         final_output = ""
+        best_output = ""
+        best_score = -1
         total_metadata = ExecutionMetadata()
 
         while refinement_count <= params.max_refinements:
@@ -165,10 +169,6 @@ class SelfRefineStrategy(AgentStrategy):
                 continue
 
             # === EVALUATION PHASE ===
-            if refinement_count >= params.max_refinements:
-                logger.info("Max refinements reached, skipping evaluation")
-                break
-
             yield self.create_log_message(
                 label="Evaluating Output Quality",
                 data={},
@@ -181,26 +181,36 @@ class SelfRefineStrategy(AgentStrategy):
                     output=final_output
                 )
 
-                if evaluation.is_satisfactory:
+                if evaluation.score > best_score:
+                    best_score = evaluation.score
+                    best_output = final_output
+
+                if evaluation.score >= self.QUALITY_THRESHOLD:
                     yield self.create_log_message(
                         label="Quality Check: PASS",
                         data={"score": evaluation.score},
                         status=ToolInvokeMessage.LogMessage.LogStatus.SUCCESS
                     )
-                    logger.info(f"Output satisfactory (score: {evaluation.score})")
+                    logger.info(f"Output reached quality threshold (score: {evaluation.score})")
                     break
-                else:
-                    yield self.create_log_message(
-                        label="Quality Check: NEEDS IMPROVEMENT",
-                        data={
-                            "score": evaluation.score,
-                            "issues": evaluation.issues
-                        },
-                        status=ToolInvokeMessage.LogMessage.LogStatus.SUCCESS
-                    )
-                    logger.info(f"Output needs improvement: {evaluation.issues}")
-                    previous_critique = evaluation.issues
-                    refinement_count += 1
+
+                yield self.create_log_message(
+                    label="Quality Check: NEEDS IMPROVEMENT",
+                    data={
+                        "score": evaluation.score,
+                        "issues": evaluation.issues
+                    },
+                    status=ToolInvokeMessage.LogMessage.LogStatus.SUCCESS
+                )
+                logger.info(f"Output needs improvement: {evaluation.issues}")
+
+                if refinement_count >= params.max_refinements:
+                    final_output = best_output
+                    logger.info(f"Max refinements reached, returning best output (score: {best_score})")
+                    break
+
+                previous_critique = evaluation.issues
+                refinement_count += 1
 
             except Exception as e:
                 logger.error(f"Evaluation failed: {e}")
